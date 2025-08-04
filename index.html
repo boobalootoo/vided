@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Video Editor</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      padding: 1rem;
+    }
+
+    video {
+      max-width: 100%;
+      margin-top: 10px;
+      border: 1px solid #ccc;
+    }
+
+    #timeline {
+      display: flex;
+      overflow-x: auto;
+      margin: 10px 0;
+    }
+
+    .frame {
+      width: 100px;
+      height: 56px;
+      margin-right: 4px;
+      object-fit: cover;
+      border: 1px solid #ccc;
+      cursor: pointer;
+    }
+
+    .tools {
+      margin-top: 1rem;
+      display: flex;
+      gap: 10px;
+    }
+
+    #waveform {
+      height: 100px;
+      background: #f0f0f0;
+      margin-top: 10px;
+    }
+
+    #transcript {
+      border: 1px solid #ccc;
+      padding: 0.5rem;
+      margin-top: 1rem;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+
+    .snip-bin {
+      border: 1px dashed #888;
+      margin-top: 1rem;
+      padding: 10px;
+    }
+
+    .clip {
+      background: #eee;
+      padding: 5px;
+      margin-bottom: 5px;
+    }
+
+    button {
+      padding: 5px 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Video Editor</h1>
+
+  <input type="file" accept="video/*" id="videoUpload">
+
+  <video id="video" controls muted autoplay playsinline crossorigin="anonymous" width="600"></video>
+
+  <div id="waveform"></div>
+
+  <div id="timeline"></div>
+
+  <div id="transcript"><strong>Transcript:</strong> (placeholder only)</div>
+
+  <div class="tools">
+    <button id="burnBtn">Burn Section</button>
+    <button id="snipBtn">Snip Section</button>
+  </div>
+
+  <div class="snip-bin" id="snipBin">
+    <strong>Snipped Clips:</strong>
+  </div>
+
+  <script src="https://unpkg.com/wavesurfer.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const upload = document.getElementById("videoUpload");
+    const timeline = document.getElementById("timeline");
+    const burnBtn = document.getElementById("burnBtn");
+    const snipBtn = document.getElementById("snipBtn");
+    const snipBin = document.getElementById("snipBin");
+
+    let waveform;
+    let snippedClips = [];
+
+    upload.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      console.clear();
+      console.log("📁 File selected:", file.name);
+
+      const url = URL.createObjectURL(file);
+      video.src = url;
+      video.load();
+
+      try {
+        await video.play();
+        video.pause();
+        console.log("🎬 Video loaded and first frame available.");
+        generateFrames(video);
+      } catch (err) {
+        console.error("⚠️ Video could not be played. Autoplay might be blocked or format unsupported.", err);
+      }
+
+      generateWaveform(url);
+      loadTranscript(file.name);
+    });
+
+    function generateWaveform(videoUrl) {
+      try {
+        if (waveform) waveform.destroy();
+        waveform = WaveSurfer.create({
+          container: "#waveform",
+          waveColor: "#999",
+          progressColor: "#333",
+          height: 100,
+        });
+        waveform.load(videoUrl);
+        waveform.on("ready", () => console.log("🌊 Waveform ready."));
+        waveform.on("error", e => console.error("❌ Waveform error:", e));
+      } catch (err) {
+        console.error("❌ Failed to generate waveform:", err);
+      }
+    }
+
+    function generateFrames(videoEl) {
+      timeline.innerHTML = "";
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      videoEl.onloadedmetadata = () => {
+        const duration = videoEl.duration;
+        const frameRate = 2;
+        canvas.width = 160;
+        canvas.height = 90;
+
+        const times = [];
+        for (let t = 0; t < duration; t += 1 / frameRate) {
+          times.push(t);
+        }
+
+        let index = 0;
+
+        const seekAndCapture = () => {
+          if (index >= times.length) {
+            console.log("✅ All thumbnails generated.");
+            return;
+          }
+          videoEl.currentTime = times[index];
+        };
+
+        const captureFrame = () => {
+          try {
+            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+            const img = new Image();
+            img.src = canvas.toDataURL();
+            img.className = "frame";
+            img.title = `${times[index].toFixed(2)}s`;
+            img.dataset.time = times[index];
+            img.addEventListener("click", () => {
+              videoEl.currentTime = parseFloat(img.dataset.time);
+            });
+            timeline.appendChild(img);
+            index++;
+            seekAndCapture();
+          } catch (err) {
+            console.error("❌ Error drawing video frame to canvas. Check if the video is seekable and allowed (CORS):", err);
+          }
+        };
+
+        videoEl.addEventListener("seeked", function handleSeek() {
+          if ("requestVideoFrameCallback" in videoEl) {
+            videoEl.requestVideoFrameCallback(() => {
+              captureFrame();
+            });
+          } else {
+            setTimeout(() => captureFrame(), 200);
+          }
+        });
+
+        console.log("📸 Starting thumbnail generation...");
+        seekAndCapture();
+      };
+    }
+
+    function loadTranscript(filename) {
+      document.getElementById("transcript").innerHTML = `
+        <strong>Transcript:</strong><br>
+        Transcript for <em>${filename}</em> not available in demo mode.
+      `;
+    }
+
+    burnBtn.addEventListener("click", () => {
+      const start = prompt("Enter start time to burn (seconds):");
+      const end = prompt("Enter end time to burn (seconds):");
+      if (start && end) {
+        console.log(`🔥 Burn tool activated: Marked ${start}s to ${end}s for deletion.`);
+        alert(`Marked ${start} to ${end}s for deletion.\n(Note: Burn is only visual, no actual editing yet.)`);
+      }
+    });
+
+    snipBtn.addEventListener("click", () => {
+      const start = prompt("Enter start time to snip (seconds):");
+      const end = prompt("Enter end time to snip (seconds):");
+      if (start && end) {
+        const clip = document.createElement("div");
+        clip.className = "clip";
+        clip.textContent = `Clip: ${start} - ${end}s`;
+        snipBin.appendChild(clip);
+        snippedClips.push({ start: parseFloat(start), end: parseFloat(end) });
+        console.log(`✂️ Snip tool: Added ${start}s to ${end}s to bin.`);
+      }
+    });
+  </script>
+</body>
+</html>
