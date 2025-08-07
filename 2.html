@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Video Editor with Skip & Trim</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    video { max-width: 100%; display: block; margin-bottom: 10px; }
+    .section { border: 1px solid #ccc; padding: 5px; margin-bottom: 5px; }
+    .controls, .skip-section { margin: 10px 0; }
+    .skip-section input { width: 5em; margin: 0 5px; }
+    button { margin: 0 5px; }
+  </style>
+</head>
+<body>
+
+<h2>📹 Video Editor with Skip & Trim</h2>
+
+<input type="file" id="videoInput" accept="video/*"><br>
+<video id="video" controls></video>
+
+<div class="controls">
+  <button id="addSkip">+ Add Skip Section</button>
+  <button id="downloadTrimmed">🎬 Download Trimmed Video</button>
+</div>
+
+<div id="skipList"></div>
+
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
+<script>
+  const video = document.getElementById('video');
+  const videoInput = document.getElementById('videoInput');
+  const skipList = document.getElementById('skipList');
+  const skipSections = [];
+
+  let ffmpeg;
+
+  videoInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.load();
+    video.play();
+    video._originalFile = file;
+  });
+
+  // Skip logic during playback
+  video.addEventListener('timeupdate', () => {
+    for (const section of skipSections) {
+      if (section.enabled && video.currentTime >= section.start && video.currentTime < section.end) {
+        video.currentTime = section.end;
+        break;
+      }
+    }
+  });
+
+  document.getElementById('addSkip').addEventListener('click', () => {
+    const start = parseFloat(prompt("Skip start time (in seconds):"));
+    const end = parseFloat(prompt("Skip end time (in seconds):"));
+
+    if (!isNaN(start) && !isNaN(end) && end > start) {
+      const section = { start, end, enabled: true };
+      skipSections.push(section);
+      renderSkipSections();
+    }
+  });
+
+  function renderSkipSections() {
+    skipList.innerHTML = '';
+    skipSections.forEach((sec, i) => {
+      const div = document.createElement('div');
+      div.className = 'section';
+      div.innerHTML = `
+        <label>Start: <input type="number" step="0.1" value="${sec.start}" onchange="updateSection(${i}, 'start', this.value)"></label>
+        <label>End: <input type="number" step="0.1" value="${sec.end}" onchange="updateSection(${i}, 'end', this.value)"></label>
+        <label><input type="checkbox" ${sec.enabled ? 'checked' : ''} onchange="toggleSection(${i}, this.checked)"> Enabled</label>
+        <button onclick="removeSection(${i})">❌ Remove</button>
+      `;
+      skipList.appendChild(div);
+    });
+  }
+
+  window.updateSection = (i, key, value) => {
+    skipSections[i][key] = parseFloat(value);
+  };
+
+  window.toggleSection = (i, val) => {
+    skipSections[i].enabled = val;
+  };
+
+  window.removeSection = (i) => {
+    skipSections.splice(i, 1);
+    renderSkipSections();
+  };
+
+  document.getElementById('downloadTrimmed').addEventListener('click', async () => {
+    if (!video._originalFile) return alert('Upload a video first.');
+    
+    const enabledSkips = skipSections
+      .filter(s => s.enabled)
+      .sort((a, b) => a.start - b.start);
+
+    const duration = video.duration;
+    const keepRanges = [];
+
+    let last = 0;
+    for (const skip of enabledSkips) {
+      if (last < skip.start) {
+        keepRanges.push([last, skip.start]);
+      }
+      last = skip.end;
+    }
+    if (last < duration) {
+      keepRanges.push([last, duration]);
+    }
+
+    if (keepRanges.length === 0) return alert("Nothing to keep!");
+
+    // Load ffmpeg.wasm
+    if (!ffmpeg) {
+      ffmpeg = FFmpeg.createFFmpeg({ log: true });
+      await ffmpeg.load();
+    }
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const data = new Uint8Array(reader.result);
+      const filename = 'input.mp4';
+      ffmpeg.FS('writeFile', filename, data);
+
+      const concatList = keepRanges.map(([start, end], i) => {
+        const out = `clip${i}.mp4`;
+        return { out, start, dur: end - start };
+      });
+
+      // Trim each range
+      for (const clip of concatList) {
+        await ffmpeg.run(
+          '-ss', `${clip.start}`,
+          '-t', `${clip.dur}`,
+          '-i', 'input.mp4',
+          '-c', 'copy',
+          clip.out
+        );
+      }
+
+      // Create concat list file
+      const concatTxt = concatList.map(c => `file '${c.out}'`).join('\n');
+      ffmpeg.FS('writeFile', 'list.txt', concatTxt);
+
+      // Merge clips
+      await ffmpeg.run('-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', 'output.mp4');
+
+      const outData = ffmpeg.FS('readFile', 'output.mp4');
+      const blob = new Blob([outData.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'trimmed_video.mp4';
+      a.click();
+    };
+    reader.readAsArrayBuffer(video._originalFile);
+  });
+</script>
+
+</body>
+</html>
