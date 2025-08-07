@@ -2,21 +2,171 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Video Editor</title>
-  <link rel="stylesheet" href="styles.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.2/dist/ffmpeg.min.js"></script>
+  <script src="https://unpkg.com/wavesurfer.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Inter', sans-serif;
+      background: #f9f9f9;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1em;
+    }
+
+    h1 {
+      margin-bottom: 0.5em;
+    }
+
+    video {
+      max-width: 100%;
+      margin-bottom: 1em;
+      background: black;
+    }
+
+    #controls, #waveform, #frames, #transcript {
+      width: 100%;
+      max-width: 800px;
+      margin-top: 1em;
+    }
+
+    #frames img {
+      height: 60px;
+      margin: 2px;
+      cursor: pointer;
+    }
+
+    #transcript {
+      border: 1px solid #ccc;
+      padding: 0.5em;
+      background: white;
+      height: 100px;
+      overflow-y: auto;
+      font-size: 0.9em;
+    }
+
+    input[type="file"] {
+      margin-bottom: 1em;
+    }
+
+    button {
+      padding: 0.5em 1em;
+      font-size: 1em;
+      margin-top: 0.5em;
+      cursor: pointer;
+    }
+
+    #waveform {
+      height: 100px;
+      background: #fff;
+      border: 1px solid #ccc;
+    }
+
+    #log {
+      font-size: 0.8em;
+      color: #555;
+      margin-top: 1em;
+      white-space: pre-wrap;
+    }
+  </style>
 </head>
 <body>
-  <h1>Simple Video Editor</h1>
-  <input type="file" id="videoInput" accept="video/*" />
+  <h1>In-Browser Video Editor</h1>
+  <input type="file" id="video-upload" accept="video/*" />
   <video id="video" controls></video>
-  <div class="controls">
-    <label>Start: <input type="number" id="startTime" step="0.1" /></label>
-    <label>End: <input type="number" id="endTime" step="0.1" /></label>
-    <button onclick="trimVideo()">Preview Trim</button>
-    <button onclick="downloadTrimmed()">Download Trimmed Video</button>
-  </div>
-  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
-  <script src="main.js"></script>
+
+  <div id="waveform"></div>
+
+  <div id="frames"></div>
+
+  <div id="transcript">Transcript will appear here (placeholder).</div>
+
+  <div id="log"></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const upload = document.getElementById('video-upload');
+    const framesContainer = document.getElementById('frames');
+    const logEl = document.getElementById('log');
+
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ffmpeg = createFFmpeg({ log: true });
+
+    let wavesurfer;
+
+    function log(msg) {
+      logEl.textContent += msg + "\n";
+    }
+
+    upload.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const url = URL.createObjectURL(file);
+      video.src = url;
+      video.load();
+
+      if (!ffmpeg.isLoaded()) {
+        log("Loading FFmpeg...");
+        await ffmpeg.load();
+        log("FFmpeg loaded.");
+      }
+
+      log("Reading audio waveform...");
+      if (wavesurfer) wavesurfer.destroy();
+      wavesurfer = WaveSurfer.create({
+        container: '#waveform',
+        waveColor: '#999',
+        progressColor: '#555',
+        height: 100,
+      });
+      wavesurfer.load(url);
+
+      extractFrames(file);
+    });
+
+    async function extractFrames(file) {
+      const fileName = "video.mp4";
+      ffmpeg.FS('writeFile', fileName, await fetchFile(file));
+
+      const durationProbe = await ffmpeg.run(
+        '-i', fileName
+      ).catch(() => {});
+
+      log("Extracting thumbnails...");
+      await ffmpeg.run(
+        '-i', fileName,
+        '-vf', 'fps=1',
+        '-qscale:v', '2',
+        'thumb%d.jpg'
+      );
+
+      let i = 1;
+      framesContainer.innerHTML = '';
+      while (true) {
+        try {
+          const frameData = ffmpeg.FS('readFile', `thumb${i}.jpg`);
+          const blob = new Blob([frameData.buffer], { type: 'image/jpeg' });
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(blob);
+          img.title = `Frame ${i}`;
+          img.onclick = () => {
+            video.currentTime = i;
+          };
+          framesContainer.appendChild(img);
+          i++;
+        } catch (e) {
+          break;
+        }
+      }
+
+      log(`Extracted ${i - 1} thumbnails.`);
+    }
+  </script>
 </body>
 </html>
