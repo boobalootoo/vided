@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Cutter App</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f3f4f6;
+    }
+    #videoPlayer {
+      max-width: 100%;
+      height: auto;
+      border: 4px solid #1f2937;
+      background-color: black;
+      display: block;
+      margin: 0 auto;
+    }
+  </style>
+</head>
+<body class="p-4 bg-gray-100 min-h-screen flex flex-col items-center justify-center">
+
+  <div class="bg-white p-8 rounded-2xl shadow-xl max-w-2xl w-full">
+    <h1 class="text-3xl font-extrabold text-gray-900 mb-4 text-center">Video Cutter</h1>
+    <p class="text-gray-600 mb-6 text-center">Upload a video, set the start and end times, and cut the clip.</p>
+
+    <!-- File Upload -->
+    <div class="mb-6">
+      <label for="videoInput" class="block text-sm font-medium text-gray-700 mb-2">
+        Choose a video file:
+      </label>
+      <input type="file" id="videoInput" accept="video/*" class="w-full text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+    </div>
+
+    <!-- Video Player -->
+    <video id="videoPlayer" controls class="rounded-xl mb-6"></video>
+    <div id="message" class="text-sm font-medium text-center text-gray-500 mb-4">Please upload a video to begin.</div>
+
+    <!-- Controls -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+      <div>
+        <label for="startTime" class="block text-sm font-medium text-gray-700">Start Time (seconds):</label>
+        <input type="number" id="startTime" value="0" min="0" step="0.1" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+      </div>
+      <div>
+        <label for="endTime" class="block text-sm font-medium text-gray-700">End Time (seconds):</label>
+        <input type="number" id="endTime" value="0" min="0" step="0.1" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+      </div>
+    </div>
+    
+    <!-- Buttons -->
+    <div class="flex justify-center gap-4">
+      <button id="cutAndProcess" class="w-full sm:w-auto px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400 disabled:cursor-not-allowed transition duration-150 ease-in-out">
+        Cut & Process
+      </button>
+      <button id="downloadButton" class="w-full sm:w-auto px-6 py-3 border border-transparent text-base font-medium rounded-xl text-gray-700 bg-gray-200 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 disabled:opacity-50 disabled:cursor-not-allowed transition duration-150 ease-in-out" disabled>
+        Download Edited Video
+      </button>
+    </div>
+  </div>
+
+  <!-- Hidden canvas for video processing -->
+  <canvas id="videoCanvas" style="display:none;"></canvas>
+
+  <script>
+    // Get references to all the DOM elements
+    const videoInput = document.getElementById('videoInput');
+    const videoPlayer = document.getElementById('videoPlayer');
+    const startTimeInput = document.getElementById('startTime');
+    const endTimeInput = document.getElementById('endTime');
+    const cutAndProcessBtn = document.getElementById('cutAndProcess');
+    const downloadButton = document.getElementById('downloadButton');
+    const messageElement = document.getElementById('message');
+    const videoCanvas = document.getElementById('videoCanvas');
+
+    let videoFile = null;
+    let cutVideoBlob = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let animationFrameId = null;
+
+    // Handle file selection
+    videoInput.addEventListener('change', function () {
+      videoFile = this.files[0];
+      if (videoFile) {
+        const url = URL.createObjectURL(videoFile);
+        videoPlayer.src = url;
+        videoPlayer.onloadedmetadata = () => {
+          // Set the end time to the full duration of the video
+          endTimeInput.value = videoPlayer.duration.toFixed(2);
+          messageElement.textContent = `Video loaded. Duration: ${videoPlayer.duration.toFixed(2)}s`;
+          cutAndProcessBtn.disabled = false;
+        };
+        // Reset state
+        downloadButton.disabled = true;
+        cutVideoBlob = null;
+      } else {
+        messageElement.textContent = "Please upload a video to begin.";
+        cutAndProcessBtn.disabled = true;
+      }
+    });
+
+    // Handle the cut and process button click
+    cutAndProcessBtn.addEventListener('click', async () => {
+      if (!videoFile) {
+        alert("Please upload a video first.");
+        return;
+      }
+
+      const startTime = parseFloat(startTimeInput.value);
+      const endTime = parseFloat(endTimeInput.value);
+      const duration = endTime - startTime;
+
+      if (isNaN(startTime) || isNaN(endTime) || startTime >= endTime || startTime < 0) {
+        alert("Invalid start and end times. Please ensure the start time is before the end time.");
+        return;
+      }
+
+      // Update UI and disable buttons
+      messageElement.textContent = "Processing... This may take a moment.";
+      cutAndProcessBtn.disabled = true;
+      downloadButton.disabled = true;
+
+      try {
+        // Set up the video player for the cut
+        videoPlayer.currentTime = startTime;
+
+        // Use a hidden canvas to create a MediaStream for the video track
+        const canvasContext = videoCanvas.getContext('2d');
+        videoCanvas.width = videoPlayer.videoWidth;
+        videoCanvas.height = videoPlayer.videoHeight;
+        const canvasStream = videoCanvas.captureStream();
+
+        // Create an AudioContext to handle the audio track
+        const audioContext = new AudioContext();
+        const audioSource = audioContext.createMediaElementSource(videoPlayer);
+        const audioDestination = audioContext.createMediaStreamDestination();
+        
+        // Connect the audio source to the destination
+        audioSource.connect(audioDestination);
+
+        // Combine the video and audio tracks into a single stream
+        const combinedStream = new MediaStream();
+        combinedStream.addTrack(canvasStream.getVideoTracks()[0]);
+        combinedStream.addTrack(audioDestination.stream.getAudioTracks()[0]);
+
+        // Use MediaRecorder to record the combined stream
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm; codecs=vp9' });
+
+        mediaRecorder.ondataavailable = event => {
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          cutVideoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+          messageElement.textContent = "Video cut successfully! You can now download it.";
+          downloadButton.disabled = false;
+          cutAndProcessBtn.disabled = false;
+          // Clean up the animation loop and audio context
+          cancelAnimationFrame(animationFrameId);
+          audioContext.close();
+        };
+
+        // Start playing the video to capture the frames and audio
+        videoPlayer.play();
+
+        // Draw video frames to the canvas in a loop
+        function drawVideoFrame() {
+          if (videoPlayer.currentTime < endTime) {
+            canvasContext.drawImage(videoPlayer, 0, 0, videoCanvas.width, videoCanvas.height);
+            animationFrameId = requestAnimationFrame(drawVideoFrame);
+          } else {
+            videoPlayer.pause();
+            mediaRecorder.stop();
+          }
+        }
+        
+        // Start the process
+        videoPlayer.addEventListener('play', () => {
+          mediaRecorder.start();
+          drawVideoFrame();
+        }, { once: true });
+
+      } catch (error) {
+        console.error("Video cutting failed:", error);
+        messageElement.textContent = "An error occurred during processing. Please try again.";
+        cutAndProcessBtn.disabled = false;
+        downloadButton.disabled = true;
+      }
+    });
+
+    // Handle the download button click
+    downloadButton.addEventListener('click', () => {
+      if (cutVideoBlob) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(cutVideoBlob);
+        a.download = `cut-video-${Date.now()}.webm`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Clean up the object URL
+        URL.revokeObjectURL(a.href);
+      }
+    });
+  </script>
+</body>
+</html>
