@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Video Segment Thumbnails & Waveform</title>
+<style>
+  body {
+    font-family: sans-serif;
+    padding: 1em;
+    max-width: 900px;
+    margin: auto;
+  }
+  #upload {
+    margin-bottom: 1em;
+  }
+  #segments {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 10px;
+  }
+  .segment {
+    position: relative;
+    border: 2px solid #333;
+    border-radius: 4px;
+    cursor: pointer;
+    width: 120px;
+    height: 68px;
+    flex: 0 0 auto;
+    user-select: none;
+    overflow: hidden;
+    background: #eee;
+  }
+  .segment.deleted {
+    border-color: #f44336;
+    filter: grayscale(80%);
+  }
+  .segment img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: 4px;
+  }
+  .segment-label {
+    position: absolute;
+    bottom: 2px;
+    right: 4px;
+    font-size: 12px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    padding: 1px 4px;
+    border-radius: 2px;
+    pointer-events: none;
+  }
+  #mergedPlayer {
+    width: 100%;
+    max-width: 720px;
+    margin-top: 20px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    display: block;
+  }
+  #waveformCanvas {
+    width: 100%;
+    max-width: 720px;
+    height: 80px;
+    margin-top: 8px;
+    background: #222;
+    border-radius: 6px;
+  }
+  #controls {
+    margin-top: 10px;
+  }
+  button {
+    margin-right: 10px;
+    padding: 8px 16px;
+    font-size: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Video Segment Thumbnails & Waveform</h1>
+<div>
+  Upload a video. Click thumbnails to toggle deletion (red = deleted). The waveform below shows audio of the merged video.
+</div>
+<input type="file" accept="video/*" id="upload" />
+
+<div id="segments"></div>
+
+<video id="mergedPlayer" controls crossorigin="anonymous"></video>
+<canvas id="waveformCanvas"></canvas>
+
+<div id="controls">
+  <button id="playMerged" disabled>Play Merged Segments</button>
+  <button id="downloadMerged" disabled>Download Merged Video</button>
+</div>
+
+<script>
+const upload = document.getElementById('upload');
+const segmentsDiv = document.getElementById('segments');
+const mergedPlayer = document.getElementById('mergedPlayer');
+const waveformCanvas = document.getElementById('waveformCanvas');
+const playMergedBtn = document.getElementById('playMerged');
+const downloadMergedBtn = document.getElementById('downloadMerged');
+
+let segments = []; // {index, start, end, deleted, thumbnailImg}
+let videoSrc = null;
+let audioContext, analyser, dataArray, sourceNode;
+let animationId;
+
+upload.onchange = () => {
+  const file = upload.files[0];
+  if (!file) return;
+  if (videoSrc) {
+    URL.revokeObjectURL(videoSrc);
+    cancelAnimationFrame(animationId);
+  }
+  videoSrc = URL.createObjectURL(file);
+  segmentsDiv.innerHTML = "";
+  segments = [];
+  mergedPlayer.src = videoSrc;
+
+  playMergedBtn.disabled = true;
+  downloadMergedBtn.disabled = true;
+
+  // Clean up audio context if any
+  if(audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
+
+  // Use hidden video to get metadata and capture thumbnails
+  const tempVideo = document.createElement('video');
+  tempVideo.preload = "metadata";
+  tempVideo.src = videoSrc;
+
+  tempVideo.onloadedmetadata = async () => {
+    const duration = tempVideo.duration;
+    const segmentCount = Math.floor(duration);
+
+    for(let i = 0; i < segmentCount; i++) {
+      await createThumbnail(tempVideo, i);
+    }
+    playMergedBtn.disabled = false;
+    downloadMergedBtn.disabled = false;
+
+    setupAudioAnalysis();
+  };
+};
+
+function createThumbnail(video, index) {
+  return new Promise(resolve => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const width = 160;
+    const height = 90;
+    canvas.width = width;
+    canvas.height = height;
+
+    function captureFrame() {
+      video.pause();
+      video.currentTime = index;
+    }
+
+    function drawFrame() {
+      ctx.drawImage(video, 0, 0, width, height);
+      const dataURL = canvas.toDataURL();
+      addThumbnail(index, dataURL);
+      video.removeEventListener('seeked', drawFrame);
+      resolve();
+    }
+
+    video.addEventListener('seeked', drawFrame);
+    captureFrame();
+  });
+}
+
+function addThumbnail(index, dataURL) {
+  const container = document.createElement('div');
+  container.classList.add('segment');
+
+  const img = document.createElement('img');
+  img.src = dataURL;
+
+  const label = document.createElement('div');
+  label.className = 'segment-label';
+  label.textContent = index + 1;
+
+  container.appendChild(img);
+  container.appendChild(label);
+
+  let deleted = false;
+  container.onclick = () => {
+    deleted = !deleted;
+    container.classList.toggle('deleted', deleted);
+    const seg = segments.find(s => s.index === index);
+    if (seg) seg.deleted = deleted;
+  };
+
+  segmentsDiv.appendChild(container);
+
+  segments.push({index, start: index, end: index + 1, deleted: false, thumbnailImg: img});
+}
+
+function waitForTime(video, time) {
+  return new Promise(resolve => {
+    function check() {
+      if (video.currentTime >= time || video.ended) {
+        video.pause();
+        video.removeEventListener('timeupdate', check);
+        resolve();
+      }
+    }
+    video.addEventListener('timeupdate', check);
+  });
+}
+
+// Playback merged segments smoothly
+playMergedBtn.onclick = async () => {
+  const activeSegments = segments.filter(s => !s.deleted);
+  if (activeSegments.length === 0) {
+    alert("No segments selected to play.");
+    return;
+  }
+  playMergedBtn.disabled = true;
+  downloadMergedBtn.disabled = true;
+
+  for (let i = 0; i < activeSegments.length; i++) {
+    const seg = activeSegments[i];
+    mergedPlayer.currentTime = seg.start;
+    try {
+      await mergedPlayer.play();
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error(e);
+    }
+
+    // Wait until segment end - 0.05 sec to reduce jump gap
+    await waitForTime(mergedPlayer, seg.end - 0.05);
+
+    // Pause just before segment end for smoother jump
+    mergedPlayer.pause();
+
+    // Small delay to help smooth transition
+    await new Promise(r => setTimeout(r, 30));
+  }
+  mergedPlayer.pause();
+
+  playMergedBtn.disabled = false;
+  downloadMergedBtn.disabled = false;
+};
+
+// Download trimmed video by recording mergedPlayer playback
+downloadMergedBtn.onclick = async () => {
+  const activeSegments = segments.filter(s => !s.deleted);
+  if (activeSegments.length === 0) {
+    alert("No segments selected to download.");
+    return;
+  }
+
+  alert("Recording trimmed video. This may take some time depending on video length.");
+
+  playMergedBtn.disabled = true;
+  downloadMergedBtn.disabled = true;
+
+  const stream = mergedPlayer.captureStream();
+  const recordedChunks = [];
+  const mediaRecorder = new MediaRecorder(stream, {mimeType: 'video/webm; codecs=vp8,opus'});
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordedChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, {type: 'video/webm'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'trimmed-video.webm';
+    a.click();
+    URL.revokeObjectURL(url);
+
+    playMergedBtn.disabled = false;
+    downloadMergedBtn.disabled = false;
+  };
+
+  mediaRecorder.start();
+
+  for (let i = 0; i < activeSegments.length; i++) {
+    const seg = activeSegments[i];
+    mergedPlayer.currentTime = seg.start;
+    try {
+      await mergedPlayer.play();
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error(e);
+    }
+
+    await waitForTime(mergedPlayer, seg.end - 0.05);
+    mergedPlayer.pause();
+    await new Promise(r => setTimeout(r, 30));
+  }
+  mergedPlayer.pause();
+  mediaRecorder.stop();
+};
+
+function setupAudioAnalysis() {
+  if (audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
+  audioContext = new AudioContext();
+
+  if (sourceNode) {
+    sourceNode.disconnect();
+    sourceNode = null;
+  }
+
+  sourceNode = audioContext.createMediaElementSource(mergedPlayer);
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 2048;
+  sourceNode.connect(analyser);
+  analyser.connect(audioContext.destination);
+
+  const bufferLength = analyser.frequencyBinCount;
+  dataArray = new Uint8Array(bufferLength);
+
+  drawWaveform();
+}
+
+function drawWaveform() {
+  if (!analyser) return;
+
+  analyser.getByteTimeDomainData(dataArray);
+
+  const ctx = waveformCanvas.getContext('2d');
+  const width = waveformCanvas.width = waveformCanvas.clientWidth * devicePixelRatio;
+  const height = waveformCanvas.height = waveformCanvas.clientHeight * devicePixelRatio;
+
+  ctx.clearRect(0, 0, width, height);
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#4caf50';
+  ctx.beginPath();
+
+  const sliceWidth = width / dataArray.length;
+  let x = 0;
+
+  for(let i = 0; i < dataArray.length; i++) {
+    const v = dataArray[i] / 128.0;
+    const y = v * height / 2;
+    if(i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+    x += sliceWidth;
+  }
+  ctx.lineTo(width, height/2);
+  ctx.stroke();
+
+  animationId = requestAnimationFrame(drawWaveform);
+}
+</script>
+
+</body>
+</html>
